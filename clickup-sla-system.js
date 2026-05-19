@@ -123,14 +123,8 @@ async function runSync() {
           const status = task.status?.status || 'to_do';
           const priority = task.priority?.priority || null;
           
-          let createdAt, updatedAt;
-          try {
-            createdAt = new Date(parseInt(task.date_created)).toISOString();
-            updatedAt = new Date(parseInt(task.date_updated)).toISOString();
-          } catch (dateErr) {
-            createdAt = new Date().toISOString();
-            updatedAt = createdAt;
-          }
+          const createdAt = new Date(parseInt(task.date_created)).toISOString().slice(0, 19);
+          const updatedAt = new Date(parseInt(task.date_updated)).toISOString().slice(0, 19);
 
           const assignee = task.assigned_by?.username || null;
 
