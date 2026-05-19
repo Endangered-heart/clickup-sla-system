@@ -20,34 +20,39 @@ const CONFIG = {
   DB_USER: process.env.DB_USER,
   DB_PASSWORD: process.env.DB_PASSWORD,
   DB_NAME: process.env.DB_NAME,
+  DB_PORT: parseInt(process.env.DB_PORT || '3306'),
   
   SLACK_WEBHOOK: process.env.SLACK_WEBHOOK,
   SLACK_CHANNEL: process.env.SLACK_CHANNEL || '#incidents',
   SLACK_MENTION_GROUP: process.env.SLACK_MENTION_GROUP || '@support-engg'
 };
 
-const SLA_SECONDS = 6 * 60 * 60; // 6 hours in seconds
-const AT_RISK_THRESHOLD = 30 * 60; // 30 minutes
+const SLA_SECONDS = 6 * 60 * 60;
+const AT_RISK_THRESHOLD = 30 * 60;
 
 let db;
 
-// ============================================
-// DATABASE CONNECTION
-// ============================================
-
 async function initDb() {
-  db = await mysql.createConnection({
-    host: CONFIG.DB_HOST,
-    user: CONFIG.DB_USER,
-    password: CONFIG.DB_PASSWORD,
-    database: CONFIG.DB_NAME
-  });
-  console.log('✓ Database connected');
+  try {
+    db = await mysql.createConnection({
+      host: CONFIG.DB_HOST,
+      port: CONFIG.DB_PORT,
+      user: CONFIG.DB_USER,
+      password: CONFIG.DB_PASSWORD,
+      database: CONFIG.DB_NAME,
+      waitForConnections: true,
+      connectionLimit: 1,
+      queueLimit: 0,
+      timeout: 30000,
+      enableKeepAlive: true,
+      keepAliveInitialDelayMs: 0
+    });
+    console.log('✓ Database connected');
+  } catch (error) {
+    console.error('✗ Database connection failed:', error.message);
+    throw error;
+  }
 }
-
-// ============================================
-// FETCH ISSUES FROM CLICKUP
-// ============================================
 
 async function fetchClickUpTasks() {
   return new Promise((resolve, reject) => {
@@ -75,10 +80,6 @@ async function fetchClickUpTasks() {
   });
 }
 
-// ============================================
-// SYNC TASK TO DATABASE
-// ============================================
-
 async function syncTaskToDb(task) {
   const mapStatus = (cuStatus) => {
     const statusMap = {
@@ -95,7 +96,6 @@ async function syncTaskToDb(task) {
   const assignee = task.assignees?.[0]?.username || null;
 
   try {
-    // Insert or update issue
     const [result] = await db.execute(
       `INSERT INTO issues 
        (id, clickup_task_id, title, description, assignee, priority, status, created_at, updated_at, closed_at)
@@ -121,7 +121,6 @@ async function syncTaskToDb(task) {
       ]
     );
 
-    // If new issue, create SLA record
     if (result.affectedRows === 1) {
       const slaDeadline = new Date(Date.now() + SLA_SECONDS * 1000);
       await db.execute(
@@ -137,97 +136,6 @@ async function syncTaskToDb(task) {
     console.error(`✗ Failed to sync task ${task.id}:`, error);
   }
 }
-
-// ============================================
-// DETECT STATUS CHANGES & UPDATE SLA
-// ============================================
-
-async function handleStatusChange(taskId, newStatus) {
-  try {
-    // Get current status
-    const [rows] = await db.execute(
-      'SELECT status FROM issues WHERE clickup_task_id = ?',
-      [taskId]
-    );
-
-    if (!rows.length) return;
-    const oldStatus = rows[0].status;
-
-    if (oldStatus === newStatus) return; // No change
-
-    // Record status change
-    await db.execute(
-      `INSERT INTO issue_status_history 
-       (issue_id, previous_status, new_status, blocked_start_time)
-       VALUES (?, ?, ?, IF(? = 'blocked', NOW(), NULL))`,
-      [taskId, oldStatus, newStatus, newStatus]
-    );
-
-    // If transitioning FROM blocked, calculate duration and update SLA
-    if (oldStatus === 'blocked' && newStatus !== 'blocked') {
-      const [history] = await db.execute(
-        `SELECT blocked_start_time FROM issue_status_history
-         WHERE issue_id = ? AND new_status = 'blocked' AND blocked_duration_seconds IS NULL
-         ORDER BY changed_at DESC LIMIT 1`,
-        [taskId]
-      );
-
-      if (history.length) {
-        const blockedSeconds = Math.floor(
-          (Date.now() - new Date(history[0].blocked_start_time)) / 1000
-        );
-
-        await db.execute(
-          `UPDATE issue_status_history
-           SET blocked_duration_seconds = ?
-           WHERE issue_id = ? AND new_status = 'blocked' AND blocked_duration_seconds IS NULL`,
-          [blockedSeconds, taskId]
-        );
-
-        await db.execute(
-          `UPDATE issue_sla
-           SET total_blocked_seconds = total_blocked_seconds + ?
-           WHERE issue_id = ?`,
-          [blockedSeconds, taskId]
-        );
-
-        console.log(`✓ Unblocked ${taskId}, added ${blockedSeconds}s to blocked time`);
-      }
-    }
-
-    // If closed, mark SLA
-    if (newStatus === 'closed') {
-      const [slaData] = await db.execute(
-        `SELECT created_at, total_blocked_seconds FROM issue_sla WHERE issue_id = ?`,
-        [taskId]
-      );
-
-      if (slaData.length) {
-        const effectiveSeconds = Math.floor(
-          (Date.now() - new Date(slaData[0].created_at)) / 1000
-        ) - (slaData[0].total_blocked_seconds || 0);
-
-        const slaStatus = effectiveSeconds <= SLA_SECONDS ? 'MET' : 'BREACHED';
-
-        await db.execute(
-          `UPDATE issue_sla
-           SET closed_at = NOW(), sla_status = ?
-           WHERE issue_id = ?`,
-          [slaStatus, taskId]
-        );
-
-        console.log(`✓ Closed issue ${taskId}, SLA: ${slaStatus}`);
-      }
-    }
-
-  } catch (error) {
-    console.error(`✗ Failed to handle status change for ${taskId}:`, error);
-  }
-}
-
-// ============================================
-// CHECK SLA & SEND SLACK ALERTS
-// ============================================
 
 async function checkSLAsAndAlert() {
   try {
@@ -296,21 +204,12 @@ async function checkSLAsAndAlert() {
                 value: '6 hours',
                 short: true
               }
-            ],
-            actions: [
-              {
-                type: 'button',
-                text: 'Open in ClickUp',
-                url: `https://app.clickup.com/t/${issue.clickup_task_id}`
-              }
             ]
           }
         ]
       };
 
-      // Add mention
       message.text = `${CONFIG.SLACK_MENTION_GROUP} ${message.text}`;
-
       await sendSlackMessage(message, issue.id, notificationType);
     }
 
@@ -318,10 +217,6 @@ async function checkSLAsAndAlert() {
     console.error('✗ Error checking SLAs:', error);
   }
 }
-
-// ============================================
-// SEND SLACK MESSAGE
-// ============================================
 
 async function sendSlackMessage(payload, issueId, notificationType) {
   return new Promise((resolve, reject) => {
@@ -361,10 +256,6 @@ async function sendSlackMessage(payload, issueId, notificationType) {
   });
 }
 
-// ============================================
-// UTILITY FUNCTIONS
-// ============================================
-
 function formatSeconds(seconds) {
   if (seconds < 0) {
     const absSeconds = Math.abs(seconds);
@@ -379,33 +270,25 @@ function formatSeconds(seconds) {
 
 function isAlertTime() {
   const hour = new Date().getHours();
-  return hour === 9 || hour === 17; // 9 AM or 5 PM
+  return hour === 9 || hour === 17;
 }
-
-// ============================================
-// MAIN EXECUTION
-// ============================================
 
 async function main() {
   console.log('🚀 Starting ClickUp → Slack SLA System...');
   
   try {
     await initDb();
-
-    // 1. Fetch tasks from ClickUp
     const tasks = await fetchClickUpTasks();
 
-    // 2. Sync to database
     for (const task of tasks) {
       await syncTaskToDb(task);
     }
 
-    // 3. Check SLAs and send alerts (if alert time)
     if (isAlertTime()) {
       console.log('📢 Alert time detected (9 AM or 5 PM), checking SLAs...');
       await checkSLAsAndAlert();
     } else {
-      console.log('⏭ Not alert time yet (checking at 9 AM & 5 PM)');
+      console.log('⏭ Not alert time yet (checking at 9 AM & 5 PM IST)');
     }
 
     console.log('✓ System check complete');
@@ -419,9 +302,8 @@ async function main() {
   }
 }
 
-// Run every 5 minutes to catch updates
 if (require.main === module) {
   main();
 }
 
-module.exports = { checkSLAsAndAlert, syncTaskToDb, handleStatusChange };
+module.exports = { checkSLAsAndAlert, syncTaskToDb };
