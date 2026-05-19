@@ -164,6 +164,40 @@ async function runSync() {
   }
 }
 
+async function sendSlackAlert(message) {
+  try {
+    const token = process.env.SLACK_WEBHOOK;
+    const channel = process.env.SLACK_CHANNEL;
+    
+    if (!token || !channel) {
+      console.log('Slack not configured');
+      return;
+    }
+
+    const response = await fetch('https://slack.com/api/chat.postMessage', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({
+        channel: channel,
+        text: message,
+        unfurl_links: false
+      })
+    });
+
+    const result = await response.json();
+    if (result.ok) {
+      console.log('✓ Slack message sent');
+    } else {
+      console.error('Slack error:', result.error);
+    }
+  } catch (error) {
+    console.error('Slack send error:', error);
+  }
+}
+
 runSync().catch(err => console.error('Startup sync failed:', err));
 
 setInterval(() => {
