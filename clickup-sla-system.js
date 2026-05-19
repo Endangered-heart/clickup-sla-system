@@ -147,8 +147,8 @@ async function runSync() {
     const connection = await pool.getConnection();
 
     try {
-      const [existingIssues] = await connection.query('SELECT clickup_task_id FROM issues');
-      const existingIds = new Set(existingIssues.map(i => i.clickup_task_id));
+      const [existingIssues] = await connection.query('SELECT id, clickup_task_id FROM issues');
+      const existingIds = new Map(existingIssues.map(i => [i.clickup_task_id, i.id]));
       console.log(`Found ${existingIds.size} existing issues in DB`);
 
       let insertCount = 0;
@@ -165,6 +165,7 @@ async function runSync() {
           const updatedAt = new Date(parseInt(task.date_updated));
 
           if (existingIds.has(clickupId)) {
+            const issueId = existingIds.get(clickupId);
             await connection.query(
               `UPDATE issues SET title = ?, status = ?, priority = ?, updated_at = ? WHERE clickup_task_id = ?`,
               [title, status, priority, updatedAt, clickupId]
@@ -178,7 +179,17 @@ async function runSync() {
               [id, clickupId, title, status, priority, assignee, createdAt, updatedAt]
             );
             insertCount++;
-            existingIds.add(clickupId);
+            existingIds.set(clickupId, id);
+
+            // Create SLA record for new issue (6 hour SLA)
+            const slaStart = createdAt;
+            const slaDeadline = new Date(createdAt.getTime() + 6 * 60 * 60 * 1000);
+
+            await connection.query(
+              `INSERT INTO issue_sla (issue_id, sla_start, sla_deadline, blocked_duration_mins, sla_status)
+               VALUES (?, ?, ?, 0, 'ACTIVE')`,
+              [id, slaStart, slaDeadline]
+            );
           }
         } catch (taskError) {
           console.error(`Error processing task ${task.id}:`, taskError.message);
@@ -191,6 +202,16 @@ async function runSync() {
       const [statusBreakdown] = await connection.query(
         `SELECT status, COUNT(*) as count FROM issues GROUP BY status ORDER BY count DESC`
       );
+
+      // Get SLA status breakdown
+      const [slaBreakdown] = await connection.query(`
+        SELECT 
+          sla_status,
+          COUNT(*) as count,
+          SUM(CASE WHEN NOW() > sla_deadline AND sla_status = 'ACTIVE' THEN 1 ELSE 0 END) as at_risk
+        FROM issue_sla
+        GROUP BY sla_status
+      `);
 
       // Build message
       let message = `:chart_with_upwards_trend: *ClickUp SLA System - Ops Issues Report*\n\n`;
@@ -206,6 +227,17 @@ async function runSync() {
       for (const row of statusBreakdown) {
         const emoji = statusEmojis[row.status] || ':circle:';
         message += `${emoji} *${row.status.toUpperCase()}* — ${row.count} issue${row.count > 1 ? 's' : ''}\n`;
+      }
+
+      // Add SLA breakdown
+      message += `\n⏱️ *SLA Status:*\n`;
+      for (const row of slaBreakdown) {
+        const slaEmoji = row.sla_status === 'BREACHED' ? ':x:' : row.sla_status === 'MET' ? ':white_check_mark:' : ':hourglass_flowing_sand:';
+        message += `${slaEmoji} *${row.sla_status}* — ${row.count} issue${row.count > 1 ? 's' : ''}`;
+        if (row.at_risk > 0) {
+          message += ` (${row.at_risk} at risk)`;
+        }
+        message += `\n`;
       }
 
       message += `\n📈 *Sync Summary:*\n`;
@@ -227,8 +259,7 @@ async function runSync() {
   }
 }
 
-runSync().catch(err => console.error('Startup sync failed:', err));
-
+// Only run on scheduled interval
 setInterval(() => {
   runSync().catch(err => console.error('Scheduled sync failed:', err));
 }, 5 * 60 * 1000);
