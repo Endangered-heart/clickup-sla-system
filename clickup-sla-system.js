@@ -17,6 +17,43 @@ function generateId() {
   return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
 }
 
+async function sendSlackAlert(message) {
+  try {
+    const token = process.env.SLACK_WEBHOOK;
+    const channel = process.env.SLACK_CHANNEL;
+    
+    console.log(`[SLACK] Token exists: ${!!token}, Channel: ${channel}`);
+    
+    if (!token || !channel) {
+      console.log('Slack not configured');
+      return;
+    }
+
+    const response = await fetch('https://slack.com/api/chat.postMessage', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`
+      },
+      body: JSON.stringify({
+        channel: channel,
+        text: message,
+        unfurl_links: false
+      })
+    });
+
+    const result = await response.json();
+    console.log(`[SLACK] Response:`, result);
+    if (result.ok) {
+      console.log('✓ Slack message sent');
+    } else {
+      console.error('Slack error:', result.error);
+    }
+  } catch (error) {
+    console.error('Slack send error:', error);
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
 
@@ -84,6 +121,11 @@ const server = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ status: 'error', message: error.message }));
     }
   } 
+  else if (req.method === 'POST' && req.url === '/test-slack') {
+    await sendSlackAlert('🧪 Test message from ClickUp SLA System');
+    res.writeHead(200);
+    res.end(JSON.stringify({ status: 'test sent' }));
+  }
   else {
     res.writeHead(404);
     res.end(JSON.stringify({ status: 'not found' }));
@@ -161,40 +203,6 @@ async function runSync() {
   } catch (error) {
     console.error('Fatal sync error:', error);
     throw error;
-  }
-}
-
-async function sendSlackAlert(message) {
-  try {
-    const token = process.env.SLACK_WEBHOOK;
-    const channel = process.env.SLACK_CHANNEL;
-    
-    if (!token || !channel) {
-      console.log('Slack not configured');
-      return;
-    }
-
-    const response = await fetch('https://slack.com/api/chat.postMessage', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
-      },
-      body: JSON.stringify({
-        channel: channel,
-        text: message,
-        unfurl_links: false
-      })
-    });
-
-    const result = await response.json();
-    if (result.ok) {
-      console.log('✓ Slack message sent');
-    } else {
-      console.error('Slack error:', result.error);
-    }
-  } catch (error) {
-    console.error('Slack send error:', error);
   }
 }
 
