@@ -153,7 +153,6 @@ async function runSync() {
 
       let insertCount = 0;
       let updateCount = 0;
-      let newIssues = [];
 
       for (const task of data.tasks) {
         try {
@@ -180,7 +179,6 @@ async function runSync() {
             );
             insertCount++;
             existingIds.add(clickupId);
-            newIssues.push({ title, status, priority });
           }
         } catch (taskError) {
           console.error(`Error processing task ${task.id}:`, taskError.message);
@@ -189,25 +187,34 @@ async function runSync() {
 
       console.log(`✓ Sync complete: Inserted ${insertCount}, Updated ${updateCount}`);
 
-      // Send summary message to Slack
-      if (insertCount > 0 || updateCount > 0) {
-        let message = `:chart_with_upwards_trend: *ClickUp SLA System Sync Report*\n\n`;
-        message += `📊 *Database Status:*\n`;
-        message += `  • Total Issues: ${existingIds.size}\n`;
-        message += `  • New Issues: ${insertCount}\n`;
-        message += `  • Updated Issues: ${updateCount}\n\n`;
-        
-        if (newIssues.length > 0 && newIssues.length <= 5) {
-          message += `🆕 *New Issues:*\n`;
-          newIssues.forEach(issue => {
-            message += `  • ${issue.title} (${issue.status})\n`;
-          });
-        }
-        
-        message += `\n_Sync completed at ${new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })} IST_`;
+      // Get status breakdown
+      const [statusBreakdown] = await connection.query(
+        `SELECT status, COUNT(*) as count FROM issues GROUP BY status ORDER BY count DESC`
+      );
 
-        await sendSlackAlert(message);
+      // Build message
+      let message = `:chart_with_upwards_trend: *ClickUp SLA System - Ops Issues Report*\n\n`;
+      message += `📊 *Status Breakdown:*\n`;
+      
+      const statusEmojis = {
+        'to do': ':white_circle:',
+        'in progress': ':large_blue_circle:',
+        'blocked': ':red_circle:',
+        'live': ':green_circle:'
+      };
+
+      for (const row of statusBreakdown) {
+        const emoji = statusEmojis[row.status] || ':circle:';
+        message += `${emoji} *${row.status.toUpperCase()}* — ${row.count} issue${row.count > 1 ? 's' : ''}\n`;
       }
+
+      message += `\n📈 *Sync Summary:*\n`;
+      message += `  • New Issues: ${insertCount}\n`;
+      message += `  • Updated Issues: ${updateCount}\n`;
+      message += `  • Total in DB: ${existingIds.size}\n`;
+      message += `\n_Last synced: ${new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })} IST_`;
+
+      await sendSlackAlert(message);
 
     } finally {
       connection.release();
