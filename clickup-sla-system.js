@@ -182,13 +182,12 @@ async function runSync() {
             existingIds.set(clickupId, id);
 
             // Create SLA record for new issue (6 hour SLA)
-            const slaStart = createdAt;
             const slaDeadline = new Date(createdAt.getTime() + 6 * 60 * 60 * 1000);
 
             await connection.query(
-              `INSERT INTO issue_sla (issue_id, sla_start, sla_deadline, blocked_duration_mins, sla_status)
+              `INSERT INTO issue_sla (issue_id, created_at, sla_deadline, total_blocked_seconds, sla_status)
                VALUES (?, ?, ?, 0, 'ACTIVE')`,
-              [id, slaStart, slaDeadline]
+              [id, createdAt, slaDeadline]
             );
           }
         } catch (taskError) {
@@ -211,6 +210,23 @@ async function runSync() {
           SUM(CASE WHEN NOW() > sla_deadline AND sla_status = 'ACTIVE' THEN 1 ELSE 0 END) as at_risk
         FROM issue_sla
         GROUP BY sla_status
+      `);
+
+      // Get aging breakdown (how long issues have been open)
+      const [agingBreakdown] = await connection.query(`
+        SELECT 
+          CASE 
+            WHEN TIMESTAMPDIFF(HOUR, i.created_at, NOW()) <= 2 THEN '0-2 hrs'
+            WHEN TIMESTAMPDIFF(HOUR, i.created_at, NOW()) <= 4 THEN '2-4 hrs'
+            WHEN TIMESTAMPDIFF(HOUR, i.created_at, NOW()) <= 6 THEN '4-6 hrs'
+            WHEN TIMESTAMPDIFF(HOUR, i.created_at, NOW()) > 6 THEN '6+ hrs'
+          END as age_bracket,
+          COUNT(*) as count,
+          SUM(CASE WHEN NOW() > s.sla_deadline AND s.sla_status = 'ACTIVE' THEN 1 ELSE 0 END) as breached
+        FROM issues i
+        LEFT JOIN issue_sla s ON i.id = s.issue_id
+        GROUP BY age_bracket
+        ORDER BY FIELD(age_bracket, '0-2 hrs', '2-4 hrs', '4-6 hrs', '6+ hrs')
       `);
 
       // Build message
@@ -238,6 +254,18 @@ async function runSync() {
           message += ` (${row.at_risk} at risk)`;
         }
         message += `\n`;
+      }
+
+      // Add aging breakdown
+      message += `\n📅 *Issue Age:*\n`;
+      for (const row of agingBreakdown) {
+        if (row.age_bracket) {
+          message += `  ${row.age_bracket} — ${row.count} issue${row.count > 1 ? 's' : ''}`;
+          if (row.breached > 0) {
+            message += ` (${row.breached} breached)`;
+          }
+          message += `\n`;
+        }
       }
 
       message += `\n📈 *Sync Summary:*\n`;
