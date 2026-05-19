@@ -22,8 +22,6 @@ async function sendSlackAlert(message) {
     const token = process.env.SLACK_WEBHOOK;
     const channel = process.env.SLACK_CHANNEL;
     
-    console.log(`[SLACK] Token exists: ${!!token}, Channel: ${channel}`);
-    
     if (!token || !channel) {
       console.log('Slack not configured');
       return;
@@ -43,7 +41,6 @@ async function sendSlackAlert(message) {
     });
 
     const result = await response.json();
-    console.log(`[SLACK] Response:`, result);
     if (result.ok) {
       console.log('✓ Slack message sent');
     } else {
@@ -120,11 +117,6 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(500);
       res.end(JSON.stringify({ status: 'error', message: error.message }));
     }
-  } 
-  else if (req.method === 'POST' && req.url === '/test-slack') {
-    await sendSlackAlert('🧪 Test message from ClickUp SLA System');
-    res.writeHead(200);
-    res.end(JSON.stringify({ status: 'test sent' }));
   }
   else {
     res.writeHead(404);
@@ -161,6 +153,7 @@ async function runSync() {
 
       let insertCount = 0;
       let updateCount = 0;
+      let newIssues = [];
 
       for (const task of data.tasks) {
         try {
@@ -187,6 +180,7 @@ async function runSync() {
             );
             insertCount++;
             existingIds.add(clickupId);
+            newIssues.push({ title, status, priority });
           }
         } catch (taskError) {
           console.error(`Error processing task ${task.id}:`, taskError.message);
@@ -194,6 +188,26 @@ async function runSync() {
       }
 
       console.log(`✓ Sync complete: Inserted ${insertCount}, Updated ${updateCount}`);
+
+      // Send summary message to Slack
+      if (insertCount > 0 || updateCount > 0) {
+        let message = `:chart_with_upwards_trend: *ClickUp SLA System Sync Report*\n\n`;
+        message += `📊 *Database Status:*\n`;
+        message += `  • Total Issues: ${existingIds.size}\n`;
+        message += `  • New Issues: ${insertCount}\n`;
+        message += `  • Updated Issues: ${updateCount}\n\n`;
+        
+        if (newIssues.length > 0 && newIssues.length <= 5) {
+          message += `🆕 *New Issues:*\n`;
+          newIssues.forEach(issue => {
+            message += `  • ${issue.title} (${issue.status})\n`;
+          });
+        }
+        
+        message += `\n_Sync completed at ${new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })} IST_`;
+
+        await sendSlackAlert(message);
+      }
 
     } finally {
       connection.release();
