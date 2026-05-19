@@ -8,7 +8,11 @@ require('dotenv').config();
 const CONFIG = {
   CLICKUP_API_KEY: process.env.CLICKUP_API_KEY,
   CLICKUP_LIST_ID: process.env.CLICKUP_LIST_ID,
-  MYSQL_URL: process.env.MYSQL_URL,
+  DB_HOST: process.env.DB_HOST,
+  DB_PORT: parseInt(process.env.DB_PORT || '3306'),
+  DB_USER: process.env.DB_USER,
+  DB_PASSWORD: process.env.DB_PASSWORD,
+  DB_NAME: process.env.DB_NAME,
   SLACK_WEBHOOK: process.env.SLACK_WEBHOOK,
   SLACK_CHANNEL: process.env.SLACK_CHANNEL || '#ops-tech-issues',
   SLACK_MENTION_GROUP: process.env.SLACK_MENTION_GROUP || '@support-engg'
@@ -21,7 +25,13 @@ let db;
 
 async function initDb() {
   try {
-    db = await mysql.createConnection(CONFIG.MYSQL_URL);
+    db = await mysql.createConnection({
+      host: CONFIG.DB_HOST,
+      port: CONFIG.DB_PORT,
+      user: CONFIG.DB_USER,
+      password: CONFIG.DB_PASSWORD,
+      database: CONFIG.DB_NAME
+    });
     console.log('✓ Database connected');
   } catch (error) {
     console.error('✗ Database connection failed:', error.message);
@@ -44,12 +54,17 @@ async function fetchClickUpTasks() {
       res.on('end', () => {
         try {
           const response = JSON.parse(data);
+          console.log(`✓ Fetched ${(response.tasks || []).length} tasks`);
           resolve(response.tasks || []);
         } catch (e) {
+          console.error('✗ Failed to parse ClickUp response');
           resolve([]);
         }
       });
-    }).on('error', () => resolve([])).end();
+    }).on('error', (e) => {
+      console.error('✗ ClickUp API error:', e.message);
+      resolve([]);
+    }).end();
   });
 }
 
@@ -75,6 +90,7 @@ async function syncTaskToDb(task) {
     if (result.affectedRows === 1) {
       const slaDeadline = new Date(Date.now() + SLA_SECONDS * 1000);
       await db.execute(`INSERT INTO issue_sla (issue_id, created_at, sla_deadline, sla_status) VALUES (?, NOW(), ?, 'OPEN')`, [task.id, slaDeadline]);
+      console.log(`✓ Created issue ${task.id}`);
     }
   } catch (error) {
     console.error(`✗ Sync failed for ${task.id}:`, error.message);
@@ -91,6 +107,8 @@ async function checkSLAsAndAlert() {
        WHERE i.status IN ('to_do', 'in_progress', 'live') AND TIMESTAMPDIFF(SECOND, NOW(), s.sla_deadline) < ? AND NOT EXISTS (SELECT 1 FROM slack_notifications sn WHERE sn.issue_id = i.id AND DATE(sn.sent_at) = CURDATE())`,
       [AT_RISK_THRESHOLD]
     );
+
+    console.log(`✓ Found ${issues.length} issues needing alerts`);
 
     for (const issue of issues) {
       const notificationType = issue.seconds_remaining < 0 ? 'sla_breached' : 'sla_warning';
@@ -133,6 +151,7 @@ async function sendSlackMessage(payload) {
 }
 
 async function runSync() {
+  console.log('🔄 Starting sync...');
   await initDb();
   const tasks = await fetchClickUpTasks();
   for (const task of tasks) {
@@ -140,9 +159,11 @@ async function runSync() {
   }
   const hour = new Date().getHours();
   if (hour === 9 || hour === 17) {
+    console.log('📢 Alert time, checking SLAs...');
     await checkSLAsAndAlert();
   }
   if (db) await db.end();
+  console.log('✓ Sync complete');
 }
 
 // HTTP Server
@@ -168,5 +189,5 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`✓ Server listening on port ${PORT}`);
   runSync();
-  setInterval(runSync, 5 * 60 * 1000); // Run every 5 minutes
+  setInterval(runSync, 5 * 60 * 1000);
 });
