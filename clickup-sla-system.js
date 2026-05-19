@@ -13,6 +13,10 @@ const pool = mysql.createPool({
   queueLimit: 0
 });
 
+function generateId() {
+  return Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+}
+
 const server = http.createServer(async (req, res) => {
   res.setHeader('Content-Type', 'application/json');
 
@@ -122,11 +126,9 @@ async function runSync() {
           const title = task.name || 'Untitled';
           const status = task.status?.status || 'to_do';
           const priority = task.priority?.priority || null;
-          
-          const createdAt = new Date(parseInt(task.date_created)).toISOString().slice(0, 19);
-          const updatedAt = new Date(parseInt(task.date_updated)).toISOString().slice(0, 19);
-
           const assignee = task.assigned_by?.username || null;
+          const createdAt = new Date(parseInt(task.date_created));
+          const updatedAt = new Date(parseInt(task.date_updated));
 
           if (existingIds.has(clickupId)) {
             await connection.query(
@@ -135,10 +137,11 @@ async function runSync() {
             );
             updateCount++;
           } else {
+            const id = generateId();
             await connection.query(
-              `INSERT INTO issues (clickup_task_id, title, status, priority, assignee, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)`,
-              [clickupId, title, status, priority, assignee, createdAt, updatedAt]
+              `INSERT INTO issues (id, clickup_task_id, title, status, priority, assignee, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+              [id, clickupId, title, status, priority, assignee, createdAt, updatedAt]
             );
             insertCount++;
             existingIds.add(clickupId);
