@@ -3,11 +3,11 @@ const mysql = require('mysql2/promise');
 const http = require('http');
 
 const pool = mysql.createPool({
-  host: process.env.DB_HOST || 'mysql.railway.internal',
+  host: process.env.DB_HOST || 'switchyard.proxy.rlwy.net',
   user: process.env.DB_USER || 'root',
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME || 'railway',
-  port: process.env.DB_PORT || 3306,
+  port: process.env.DB_PORT || 39978,
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0
@@ -168,7 +168,7 @@ async function runSync() {
           let severity = null;
           if (task.custom_fields && Array.isArray(task.custom_fields)) {
             const severityField = task.custom_fields.find(f => 
-              f.id === 'severity' || f.name?.toLowerCase() === 'issue severity'
+              f.id === 'e5b9356d-08b0-4e70-a2f4-4ec4b44561fc' || f.name?.toLowerCase() === 'issue severity'
             );
             if (severityField && severityField.value) {
               severity = severityField.value;
