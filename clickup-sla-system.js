@@ -22,7 +22,6 @@ const server = http.createServer(async (req, res) => {
   } 
   else if (req.method === 'GET' && req.url === '/debug-clickup') {
     try {
-      console.log('[DEBUG] Fetching ClickUp API...');
       const clickupResponse = await fetch('https://api.clickup.com/api/v2/list/' + process.env.CLICKUP_LIST_ID + '/task', {
         headers: { 'Authorization': process.env.CLICKUP_API_KEY }
       });
@@ -66,7 +65,6 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200);
       res.end(JSON.stringify(analysis, null, 2));
     } catch (error) {
-      console.error('[DEBUG ERROR]', error.message);
       res.writeHead(500);
       res.end(JSON.stringify({ status: 'error', message: error.message }));
     }
@@ -87,7 +85,6 @@ const server = http.createServer(async (req, res) => {
         recent_issues: recent
       }, null, 2));
     } catch (error) {
-      console.error('[DEBUG DB ERROR]', error.message);
       res.writeHead(500);
       res.end(JSON.stringify({ status: 'error', message: error.message, database_status: 'disconnected' }));
     }
@@ -98,7 +95,6 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200);
       res.end(JSON.stringify({ status: 'synced' }));
     } catch (error) {
-      console.error('Sync error:', error);
       res.writeHead(500);
       res.end(JSON.stringify({ status: 'error', message: error.message }));
     }
@@ -118,7 +114,6 @@ async function runSync() {
   console.log(`[${new Date().toISOString()}] Starting sync...`);
 
   try {
-    console.log('Fetching tasks from ClickUp...');
     const clickupResponse = await fetch('https://api.clickup.com/api/v2/list/' + process.env.CLICKUP_LIST_ID + '/task', {
       headers: { 'Authorization': process.env.CLICKUP_API_KEY }
     });
@@ -157,7 +152,6 @@ async function runSync() {
             createdAt = new Date(parseInt(task.date_created)).toISOString().slice(0, 19).replace('T', ' ');
             updatedAt = new Date(parseInt(task.date_updated)).toISOString().slice(0, 19).replace('T', ' ');
           } catch (dateErr) {
-            console.warn(`Warning: Could not parse dates for task ${clickupId}`);
             createdAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
             updatedAt = createdAt;
           }
@@ -168,7 +162,7 @@ async function runSync() {
           let severity = null;
           if (task.custom_fields && Array.isArray(task.custom_fields)) {
             const severityField = task.custom_fields.find(f => 
-              f.id === 'e5b9356d-08b0-4e70-a2f4-4ec4b44561fc' || f.name?.toLowerCase() === 'issue severity'
+              f.name?.toLowerCase() === 'issue severity'
             );
             if (severityField && severityField.value) {
               severity = severityField.value;
