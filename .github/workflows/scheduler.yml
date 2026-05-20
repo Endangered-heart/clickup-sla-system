@@ -1,12 +1,13 @@
-name: Run ClickUp SLA System
+name: ClickUp Sync (Silent)
 
 on:
   schedule:
     - cron: '*/5 * * * *'
+  workflow_dispatch:
 
 jobs:
-  run:
+  sync:
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger ClickUp SLA System
-        run: curl https://clickup-sla-system-production.up.railway.app
+      - name: Sync ClickUp tasks (no Slack)
+        run: curl -s -X POST https://clickup-sla-system-production.up.railway.app/sync
