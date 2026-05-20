@@ -21,11 +21,7 @@ async function sendSlackAlert(message) {
   try {
     const token = process.env.SLACK_WEBHOOK;
     const channel = process.env.SLACK_CHANNEL;
-    
-    if (!token || !channel) {
-      console.log('Slack not configured');
-      return;
-    }
+    if (!token || !channel) return;
 
     const response = await fetch('https://slack.com/api/chat.postMessage', {
       method: 'POST',
@@ -33,22 +29,25 @@ async function sendSlackAlert(message) {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${token}`
       },
-      body: JSON.stringify({
-        channel: channel,
-        text: message,
-        unfurl_links: false
-      })
+      body: JSON.stringify({ channel, text: message, unfurl_links: false })
     });
 
     const result = await response.json();
-    if (result.ok) {
-      console.log('✓ Slack message sent');
-    } else {
-      console.error('Slack error:', result.error);
-    }
+    if (result.ok) console.log('✓ Slack message sent');
+    else console.error('Slack error:', result.error);
   } catch (error) {
     console.error('Slack send error:', error);
   }
+}
+
+function isReportTime() {
+  const now = new Date();
+  // Convert to IST (UTC+5:30)
+  const ist = new Date(now.getTime() + (5.5 * 60 * 60 * 1000));
+  const hours = ist.getUTCHours();
+  const minutes = ist.getUTCMinutes();
+  // 9:00 AM IST or 5:00 PM IST (within a 5-min window)
+  return (hours === 9 && minutes < 5) || (hours === 17 && minutes < 5);
 }
 
 const server = http.createServer(async (req, res) => {
@@ -57,52 +56,14 @@ const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && req.url === '/') {
     res.writeHead(200);
     res.end(JSON.stringify({ status: 'ok', message: 'ClickUp SLA System running' }));
-  } 
-  else if (req.method === 'GET' && req.url === '/debug-clickup') {
-    try {
-      const clickupResponse = await fetch('https://api.clickup.com/api/v2/list/' + process.env.CLICKUP_LIST_ID + '/task', {
-        headers: { 'Authorization': process.env.CLICKUP_API_KEY }
-      });
-
-      if (!clickupResponse.ok) {
-        throw new Error(`ClickUp API error: ${clickupResponse.status}`);
-      }
-
-      const data = await clickupResponse.json();
-      
-      if (!data.tasks || data.tasks.length === 0) {
-        res.writeHead(200);
-        res.end(JSON.stringify({ status: 'error', message: 'No tasks from ClickUp' }));
-        return;
-      }
-
-      const firstTask = data.tasks[0];
-      res.writeHead(200);
-      res.end(JSON.stringify({
-        total_tasks: data.tasks.length,
-        first_task: {
-          id: firstTask.id,
-          name: firstTask.name,
-          status: firstTask.status?.status,
-          priority: firstTask.priority?.priority
-        }
-      }, null, 2));
-    } catch (error) {
-      res.writeHead(500);
-      res.end(JSON.stringify({ status: 'error', message: error.message }));
-    }
   }
   else if (req.method === 'GET' && req.url === '/debug-db') {
     try {
       const connection = await pool.getConnection();
       const [result] = await connection.query('SELECT COUNT(*) as count FROM issues');
       connection.release();
-
       res.writeHead(200);
-      res.end(JSON.stringify({
-        database_status: 'connected',
-        issues_count: result[0].count
-      }, null, 2));
+      res.end(JSON.stringify({ database_status: 'connected', issues_count: result[0].count }));
     } catch (error) {
       res.writeHead(500);
       res.end(JSON.stringify({ status: 'error', message: error.message }));
@@ -113,6 +74,16 @@ const server = http.createServer(async (req, res) => {
       await runSync();
       res.writeHead(200);
       res.end(JSON.stringify({ status: 'synced' }));
+    } catch (error) {
+      res.writeHead(500);
+      res.end(JSON.stringify({ status: 'error', message: error.message }));
+    }
+  }
+  else if (req.method === 'POST' && req.url === '/report') {
+    try {
+      await sendReport();
+      res.writeHead(200);
+      res.end(JSON.stringify({ status: 'report sent' }));
     } catch (error) {
       res.writeHead(500);
       res.end(JSON.stringify({ status: 'error', message: error.message }));
@@ -129,7 +100,7 @@ server.listen(PORT, () => {
   console.log(`ClickUp SLA System running on port ${PORT}`);
 });
 
-async function runSync() {
+async function runSync(withReport = false) {
   console.log(`[${new Date().toISOString()}] Starting sync...`);
 
   try {
@@ -137,9 +108,7 @@ async function runSync() {
       headers: { 'Authorization': process.env.CLICKUP_API_KEY }
     });
 
-    if (!clickupResponse.ok) {
-      throw new Error(`ClickUp API error: ${clickupResponse.status}`);
-    }
+    if (!clickupResponse.ok) throw new Error(`ClickUp API error: ${clickupResponse.status}`);
 
     const data = await clickupResponse.json();
     console.log(`✓ Received ${data.tasks.length} tasks from ClickUp`);
@@ -149,7 +118,6 @@ async function runSync() {
     try {
       const [existingIssues] = await connection.query('SELECT id, clickup_task_id FROM issues');
       const existingIds = new Map(existingIssues.map(i => [i.clickup_task_id, i.id]));
-      console.log(`Found ${existingIds.size} existing issues in DB`);
 
       let insertCount = 0;
       let updateCount = 0;
@@ -165,7 +133,6 @@ async function runSync() {
           const updatedAt = new Date(parseInt(task.date_updated));
 
           if (existingIds.has(clickupId)) {
-            const issueId = existingIds.get(clickupId);
             await connection.query(
               `UPDATE issues SET title = ?, status = ?, priority = ?, updated_at = ? WHERE clickup_task_id = ?`,
               [title, status, priority, updatedAt, clickupId]
@@ -181,11 +148,9 @@ async function runSync() {
             insertCount++;
             existingIds.set(clickupId, id);
 
-            // Create SLA record for new issue (6 hour SLA)
             const slaDeadline = new Date(createdAt.getTime() + 6 * 60 * 60 * 1000);
-
             await connection.query(
-              `INSERT INTO issue_sla (issue_id, created_at, sla_deadline, total_blocked_seconds, sla_status)
+              `INSERT IGNORE INTO issue_sla (issue_id, created_at, sla_deadline, total_blocked_seconds, sla_status)
                VALUES (?, ?, ?, 0, 'ACTIVE')`,
               [id, createdAt, slaDeadline]
             );
@@ -197,97 +162,97 @@ async function runSync() {
 
       console.log(`✓ Sync complete: Inserted ${insertCount}, Updated ${updateCount}`);
 
-      // Get status breakdown
-      const [statusBreakdown] = await connection.query(
-        `SELECT status, COUNT(*) as count FROM issues GROUP BY status ORDER BY count DESC`
-      );
-
-      // Get SLA status breakdown
-      const [slaBreakdown] = await connection.query(`
-        SELECT 
-          sla_status,
-          COUNT(*) as count,
-          SUM(CASE WHEN NOW() > sla_deadline AND sla_status = 'ACTIVE' THEN 1 ELSE 0 END) as at_risk
-        FROM issue_sla
-        GROUP BY sla_status
-      `);
-
-      // Get aging breakdown (how long issues have been open)
-      const [agingBreakdown] = await connection.query(`
-        SELECT 
-          CASE 
-            WHEN TIMESTAMPDIFF(HOUR, i.created_at, NOW()) <= 2 THEN '0-2 hrs'
-            WHEN TIMESTAMPDIFF(HOUR, i.created_at, NOW()) <= 4 THEN '2-4 hrs'
-            WHEN TIMESTAMPDIFF(HOUR, i.created_at, NOW()) <= 6 THEN '4-6 hrs'
-            WHEN TIMESTAMPDIFF(HOUR, i.created_at, NOW()) > 6 THEN '6+ hrs'
-          END as age_bracket,
-          COUNT(*) as count,
-          SUM(CASE WHEN NOW() > s.sla_deadline AND s.sla_status = 'ACTIVE' THEN 1 ELSE 0 END) as breached
-        FROM issues i
-        LEFT JOIN issue_sla s ON i.id = s.issue_id
-        GROUP BY age_bracket
-        ORDER BY FIELD(age_bracket, '0-2 hrs', '2-4 hrs', '4-6 hrs', '6+ hrs')
-      `);
-
-      // Build message
-      let message = `:chart_with_upwards_trend: *ClickUp SLA System - Ops Issues Report*\n\n`;
-      message += `📊 *Status Breakdown:*\n`;
-      
-      const statusEmojis = {
-        'to do': ':white_circle:',
-        'in progress': ':large_blue_circle:',
-        'blocked': ':red_circle:',
-        'live': ':green_circle:'
-      };
-
-      for (const row of statusBreakdown) {
-        const emoji = statusEmojis[row.status] || ':circle:';
-        message += `${emoji} *${row.status.toUpperCase()}* — ${row.count} issue${row.count > 1 ? 's' : ''}\n`;
+      // Only send Slack report if explicitly requested
+      if (withReport) {
+        await sendReport(connection);
       }
-
-      // Add SLA breakdown
-      message += `\n⏱️ *SLA Status:*\n`;
-      for (const row of slaBreakdown) {
-        const slaEmoji = row.sla_status === 'BREACHED' ? ':x:' : row.sla_status === 'MET' ? ':white_check_mark:' : ':hourglass_flowing_sand:';
-        message += `${slaEmoji} *${row.sla_status}* — ${row.count} issue${row.count > 1 ? 's' : ''}`;
-        if (row.at_risk > 0) {
-          message += ` (${row.at_risk} at risk)`;
-        }
-        message += `\n`;
-      }
-
-      // Add aging breakdown
-      message += `\n📅 *Issue Age:*\n`;
-      for (const row of agingBreakdown) {
-        if (row.age_bracket) {
-          message += `  ${row.age_bracket} — ${row.count} issue${row.count > 1 ? 's' : ''}`;
-          if (row.breached > 0) {
-            message += ` (${row.breached} breached)`;
-          }
-          message += `\n`;
-        }
-      }
-
-      message += `\n📈 *Sync Summary:*\n`;
-      message += `  • New Issues: ${insertCount}\n`;
-      message += `  • Updated Issues: ${updateCount}\n`;
-      message += `  • Total in DB: ${existingIds.size}\n`;
-      message += `\n_Last synced: ${new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })} IST_`;
-
-      await sendSlackAlert(message);
 
     } finally {
       connection.release();
     }
 
-    console.log(`✓ Sync completed at ${new Date().toISOString()}`);
   } catch (error) {
     console.error('Fatal sync error:', error);
     throw error;
   }
 }
 
-// Only run on scheduled interval
+async function sendReport(existingConnection) {
+  const connection = existingConnection || await pool.getConnection();
+  const shouldRelease = !existingConnection;
+
+  try {
+    const [statusBreakdown] = await connection.query(
+      `SELECT status, COUNT(*) as count FROM issues GROUP BY status ORDER BY count DESC`
+    );
+
+    const [slaBreakdown] = await connection.query(`
+      SELECT 
+        sla_status,
+        COUNT(*) as count,
+        SUM(CASE WHEN NOW() > sla_deadline AND sla_status = 'ACTIVE' THEN 1 ELSE 0 END) as at_risk
+      FROM issue_sla
+      GROUP BY sla_status
+    `);
+
+    const [agingBreakdown] = await connection.query(`
+      SELECT 
+        CASE 
+          WHEN TIMESTAMPDIFF(HOUR, i.created_at, NOW()) <= 2 THEN '0-2 hrs'
+          WHEN TIMESTAMPDIFF(HOUR, i.created_at, NOW()) <= 4 THEN '2-4 hrs'
+          WHEN TIMESTAMPDIFF(HOUR, i.created_at, NOW()) <= 6 THEN '4-6 hrs'
+          ELSE '6+ hrs'
+        END as age_bracket,
+        COUNT(*) as count,
+        SUM(CASE WHEN NOW() > s.sla_deadline AND s.sla_status = 'ACTIVE' THEN 1 ELSE 0 END) as breached
+      FROM issues i
+      LEFT JOIN issue_sla s ON i.id = s.issue_id
+      GROUP BY age_bracket
+      ORDER BY FIELD(age_bracket, '0-2 hrs', '2-4 hrs', '4-6 hrs', '6+ hrs')
+    `);
+
+    const statusEmojis = {
+      'to do': ':white_circle:',
+      'in progress': ':large_blue_circle:',
+      'blocked': ':red_circle:',
+      'live': ':green_circle:'
+    };
+
+    let message = `:chart_with_upwards_trend: *ClickUp SLA System - Ops Issues Report*\n\n`;
+    message += `📊 *Status Breakdown:*\n`;
+    for (const row of statusBreakdown) {
+      const emoji = statusEmojis[row.status] || ':circle:';
+      message += `${emoji} *${row.status.toUpperCase()}* — ${row.count} issue${row.count > 1 ? 's' : ''}\n`;
+    }
+
+    message += `\n⏱️ *SLA Status:*\n`;
+    for (const row of slaBreakdown) {
+      const slaEmoji = row.sla_status === 'BREACHED' ? ':x:' : row.sla_status === 'MET' ? ':white_check_mark:' : ':hourglass_flowing_sand:';
+      message += `${slaEmoji} *${row.sla_status}* — ${row.count} issue${row.count > 1 ? 's' : ''}`;
+      if (row.at_risk > 0) message += ` (${row.at_risk} at risk)`;
+      message += `\n`;
+    }
+
+    message += `\n📅 *Issue Age:*\n`;
+    for (const row of agingBreakdown) {
+      if (row.age_bracket) {
+        message += `  ${row.age_bracket} — ${row.count} issue${row.count > 1 ? 's' : ''}`;
+        if (row.breached > 0) message += ` (${row.breached} breached)`;
+        message += `\n`;
+      }
+    }
+
+    message += `\n_Last synced: ${new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' })} IST_`;
+
+    await sendSlackAlert(message);
+
+  } finally {
+    if (shouldRelease) connection.release();
+  }
+}
+
+// Sync every 5 minutes — NO Slack message
 setInterval(() => {
-  runSync().catch(err => console.error('Scheduled sync failed:', err));
+  const shouldReport = isReportTime();
+  runSync(shouldReport).catch(err => console.error('Scheduled sync failed:', err));
 }, 5 * 60 * 1000);
